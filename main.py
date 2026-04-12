@@ -15,8 +15,10 @@ import re
 from src.libs.resume_and_cover_builder import ResumeFacade, ResumeGenerator, StyleManager
 from src.resume_schemas.job_application_profile import JobApplicationProfile
 from src.resume_schemas.resume import Resume
+from src.libs.llm_manager import GPTAnswerer
+from src.linkedin_bot import LinkedInEasyApplier
 from src.logging import logger
-from src.utils.chrome_utils import init_browser
+from src.utils.chrome_utils import init_browser, init_stealth_browser
 from src.utils.constants import (
     PLAIN_TEXT_RESUME_YAML,
     SECRETS_YAML,
@@ -468,30 +470,68 @@ def create_resume_pdf(parameters: dict, llm_api_key: str):
         raise
 
         
-def handle_inquiries(selected_actions: List[str], parameters: dict, llm_api_key: str):
-    """
-    Decide which function to call based on the selected user actions.
+def run_auto_apply(
+    work_preferences: dict,
+    llm_api_key: str,
+    secrets_path: Path,
+    plain_text_resume_path: Path,
+    data_folder: Path,
+) -> None:
+    """LinkedIn job search + Easy Apply using work_preferences.yaml filters."""
+    with open(secrets_path, "r", encoding="utf-8") as f:
+        secrets = yaml.safe_load(f) or {}
+    resume_pdf = (secrets.get("resume_pdf_path") or "").strip()
+    if resume_pdf and not Path(resume_pdf).is_file():
+        logger.warning(
+            "secrets.yaml resume_pdf_path is not an existing file; PDF upload may be skipped."
+        )
+        resume_pdf = ""
 
-    :param selected_actions: List of actions selected by the user.
-    :param parameters: Configuration parameters dictionary.
-    :param llm_api_key: API key for the language model.
+    yaml_text = plain_text_resume_path.read_text(encoding="utf-8")
+    resume = Resume(yaml_text)
+    profile = JobApplicationProfile(yaml_text)
+    gpt = GPTAnswerer({}, llm_api_key)
+    gpt.set_resume(resume)
+    gpt.set_job_application_profile(profile)
+
+    driver = init_stealth_browser()
+    try:
+        bot = LinkedInEasyApplier(
+            driver,
+            gpt,
+            work_preferences,
+            state_path=data_folder / "applied_state.json",
+            resume_pdf_path=resume_pdf or None,
+        )
+        bot.wait_manual_login()
+        bot.run_search_loop()
+    finally:
+        try:
+            driver.quit()
+        except Exception:
+            pass
+
+
+def handle_inquiries(selected_action: str, parameters: dict, llm_api_key: str, secrets_path: Path, plain_text_resume_path: Path, data_folder: Path):
+    """
+    Decide which function to call based on the selected user action.
     """
     try:
-        if selected_actions:
-            if "Generate Resume" == selected_actions:
-                logger.info("Crafting a standout professional resume...")
-                create_resume_pdf(parameters, llm_api_key)
-                
-            if "Generate Resume Tailored for Job Description" == selected_actions:
-                logger.info("Customizing your resume to enhance your job application...")
-                create_resume_pdf_job_tailored(parameters, llm_api_key)
-                
-            if "Generate Tailored Cover Letter for Job Description" == selected_actions:
-                logger.info("Designing a personalized cover letter to enhance your job application...")
-                create_cover_letter(parameters, llm_api_key)
-
-        else:
+        if not selected_action:
             logger.warning("No actions selected. Nothing to execute.")
+            return
+        if selected_action == "Generate Resume":
+            logger.info("Crafting a standout professional resume...")
+            create_resume_pdf(parameters, llm_api_key)
+        elif selected_action == "Generate Resume Tailored for Job Description":
+            logger.info("Customizing your resume to enhance your job application...")
+            create_resume_pdf_job_tailored(parameters, llm_api_key)
+        elif selected_action == "Generate Tailored Cover Letter for Job Description":
+            logger.info("Designing a personalized cover letter to enhance your job application...")
+            create_cover_letter(parameters, llm_api_key)
+        elif selected_action == "Auto-apply (LinkedIn Easy Apply)":
+            logger.info("Starting LinkedIn auto-apply — ensure you comply with LinkedIn's terms of use.")
+            run_auto_apply(parameters, llm_api_key, secrets_path, plain_text_resume_path, data_folder)
     except Exception as e:
         logger.exception(f"An error occurred while handling inquiries: {e}")
         raise
@@ -511,6 +551,7 @@ def prompt_user_action() -> str:
                     "Generate Resume",
                     "Generate Resume Tailored for Job Description",
                     "Generate Tailored Cover Letter for Job Description",
+                    "Auto-apply (LinkedIn Easy Apply)",
                 ],
             ),
         ]
@@ -543,7 +584,14 @@ def main():
         selected_actions = prompt_user_action()
 
         # Handle selected actions and execute them
-        handle_inquiries(selected_actions, config, llm_api_key)
+        handle_inquiries(
+            selected_actions,
+            config,
+            llm_api_key,
+            secrets_file,
+            plain_text_resume_file,
+            data_folder,
+        )
 
     except ConfigError as ce:
         logger.error(f"Configuration error: {ce}")

@@ -1,13 +1,14 @@
 from src.logging import logger
 import os
 import json
+import re
 import shutil
 
 from dataclasses import asdict
 
 from config import JOB_APPLICATIONS_DIR
-from job import Job
-from job_application import JobApplication
+from src.job import Job
+from src.job_application import JobApplication
 
 # Base directory where all applications will be saved
 BASE_DIR = JOB_APPLICATIONS_DIR
@@ -24,7 +25,8 @@ class ApplicationSaver:
         job = self.job_application.job
 
         # Create a unique directory name using the application ID and company name
-        dir_name = f"{job.id} - {job.company} {job.title}"
+        safe = re.sub(r'[^\w\s.-]', "_", f"{job.company} {job.role}".strip())[:120]
+        dir_name = f"{job.id} - {safe}".strip()
         dir_path = os.path.join(BASE_DIR, dir_name)
 
         # Create the directory if it doesn't exist
@@ -76,17 +78,18 @@ class ApplicationSaver:
         saver.create_application_directory()
         saver.save_application_details()
         saver.save_job_description()
-        # todo: tempory fix, to rely on resume and cv path from job object instead of job application object
-        if job_application.resume_path:
+        resume_src = job_application.job.resume_path or job_application.resume_path
+        if resume_src:
             saver.save_file(
                 saver.job_application_files_path,
-                job_application.job.resume_path,
+                resume_src,
                 "resume.pdf",
             )
         logger.debug(f"Saving cover letter to path: {job_application.cover_letter_path}")
-        if job_application.cover_letter_path:
+        cover_src = job_application.job.cover_letter_path or job_application.cover_letter_path
+        if cover_src:
             saver.save_file(
                 saver.job_application_files_path,
-                job_application.job.cover_letter_path,
+                cover_src,
                 "cover_letter.pdf"
             )

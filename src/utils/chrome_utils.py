@@ -47,6 +47,24 @@ def init_browser() -> webdriver.Chrome:
         raise RuntimeError(f"Failed to initialize browser: {str(e)}")
 
 
+def init_stealth_browser():
+    """
+    Chrome with undetected-chromedriver — better for LinkedIn sign-in sessions.
+    """
+    try:
+        import undetected_chromedriver as uc
+
+        options = uc.ChromeOptions()
+        options.add_argument("--start-maximized")
+        options.add_argument("--disable-popup-blocking")
+        driver = uc.Chrome(options=options, use_subprocess=True)
+        logger.debug("Stealth Chrome initialized.")
+        return driver
+    except Exception as e:
+        logger.error(f"Stealth browser failed ({e}); falling back to standard Chrome.")
+        return init_browser()
+
+
 
 def HTML_to_PDF(html_content, driver):
     """

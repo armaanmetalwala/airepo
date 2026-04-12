@@ -505,6 +505,22 @@ class GPTAnswerer:
 
     def _clean_llm_output(self, output: str) -> str:
         return output.replace("*", "").replace("#", "").strip()
+
+    @staticmethod
+    def _profile_json(obj) -> str:
+        if obj is None:
+            return "{}"
+        if hasattr(obj, "model_dump_json"):
+            return obj.model_dump_json()
+        if isinstance(obj, list):
+            parts = []
+            for item in obj:
+                if hasattr(item, "model_dump_json"):
+                    parts.append(item.model_dump_json())
+                else:
+                    parts.append(str(item))
+            return "[" + ", ".join(parts) + "]"
+        return str(obj)
     
     def summarize_job_description(self, text: str) -> str:
         logger.debug(f"Summarizing job description: {text}")
@@ -578,7 +594,7 @@ class GPTAnswerer:
             chain = chains.get(section_name)
             raw_output = chain.invoke(
                 {
-                    RESUME: self.resume,
+                    RESUME: self._profile_json(self.resume),
                     JOB_DESCRIPTION: self.job_description,
                     COMPANY: self.job.company,
                 }
@@ -601,7 +617,7 @@ class GPTAnswerer:
             logger.error(f"Chain not defined for section '{section_name}'")
             raise ValueError(f"Chain not defined for section '{section_name}'")
         raw_output = chain.invoke(
-            {RESUME_SECTION: resume_section, QUESTION: question}
+            {RESUME_SECTION: self._profile_json(resume_section), QUESTION: question}
         )
         output = self._clean_llm_output(raw_output)
         logger.debug(f"Question answered: {output}")
@@ -618,9 +634,9 @@ class GPTAnswerer:
         chain = prompt | self.llm_cheap | StrOutputParser()
         raw_output_str = chain.invoke(
             {
-                RESUME_EDUCATIONS: self.resume.education_details,
-                RESUME_JOBS: self.resume.experience_details,
-                RESUME_PROJECTS: self.resume.projects,
+                RESUME_EDUCATIONS: self._profile_json(self.resume.education_details),
+                RESUME_JOBS: self._profile_json(self.resume.experience_details),
+                RESUME_PROJECTS: self._profile_json(self.resume.projects),
                 QUESTION: question,
             }
         )
@@ -653,10 +669,10 @@ class GPTAnswerer:
         chain = prompt | self.llm_cheap | StrOutputParser()
         raw_output_str = chain.invoke(
             {
-                RESUME: self.resume,
-                JOB_APPLICATION_PROFILE: self.job_application_profile,
+                RESUME: self._profile_json(self.resume),
+                JOB_APPLICATION_PROFILE: self._profile_json(self.job_application_profile),
                 QUESTION: question,
-                OPTIONS: options,
+                OPTIONS: ", ".join(str(o) for o in options),
             }
         )
         output_str = self._clean_llm_output(raw_output_str)
@@ -689,7 +705,7 @@ class GPTAnswerer:
         chain = prompt | self.llm_cheap | StrOutputParser()
         raw_output = chain.invoke(
             {
-                RESUME: self.resume,
+                RESUME: self._profile_json(self.resume),
                 JOB_DESCRIPTION: self.job_description,
             }
         )
