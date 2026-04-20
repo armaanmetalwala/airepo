@@ -1,10 +1,11 @@
-import os
 import time
 from selenium import webdriver
 from selenium.webdriver.chrome.service import Service as ChromeService
 from selenium.webdriver.chrome.options import Options
 from webdriver_manager.chrome import ChromeDriverManager  # Import webdriver_manager
 import urllib
+from pathlib import Path
+from typing import Optional
 from src.logging import logger
 
 def chrome_browser_options():
@@ -47,7 +48,10 @@ def init_browser() -> webdriver.Chrome:
         raise RuntimeError(f"Failed to initialize browser: {str(e)}")
 
 
-def init_stealth_browser():
+def init_stealth_browser(
+    profile_dir: Optional[str] = None,
+    headless: bool = False,
+):
     """
     Chrome with undetected-chromedriver — better for LinkedIn sign-in sessions.
     """
@@ -57,6 +61,14 @@ def init_stealth_browser():
         options = uc.ChromeOptions()
         options.add_argument("--start-maximized")
         options.add_argument("--disable-popup-blocking")
+        options.add_argument("--no-first-run")
+        options.add_argument("--no-default-browser-check")
+        if headless:
+            options.add_argument("--headless=new")
+        if profile_dir:
+            profile_path = str(Path(profile_dir).expanduser().resolve())
+            options.add_argument(f"--user-data-dir={profile_path}")
+            logger.info(f"Using persistent Chrome profile: {profile_path}")
         driver = uc.Chrome(options=options, use_subprocess=True)
         logger.debug("Stealth Chrome initialized.")
         return driver

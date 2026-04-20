@@ -9,21 +9,15 @@ from __future__ import annotations
 
 import json
 import os
-import re
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set
 from urllib.parse import quote_plus, urlparse
 
-from selenium.common.exceptions import (
-    NoSuchElementException,
-    StaleElementReferenceException,
-    TimeoutException,
-)
+from selenium.common.exceptions import NoSuchElementException, StaleElementReferenceException
 from selenium.webdriver.common.by import By
 from selenium.webdriver.remote.webdriver import WebDriver
-from selenium.webdriver.support import expected_conditions as EC
-from selenium.webdriver.support.ui import Select, WebDriverWait
+from selenium.webdriver.support.ui import Select
 
 from config import JOB_APPLICATIONS_DIR, JOB_MAX_APPLICATIONS, MINIMUM_WAIT_TIME_IN_SECONDS
 from src.job import Job
@@ -129,6 +123,56 @@ class LinkedInEasyApplier:
             "Sign in to LinkedIn in the browser window if needed, then return here."
         )
         input("Press Enter after you are logged in and the feed loads… ")
+
+    def _is_logged_in(self) -> bool:
+        self.driver.get("https://www.linkedin.com/feed/")
+        time.sleep(2)
+        url = (self.driver.current_url or "").lower()
+        if "linkedin.com/login" in url or "linkedin.com/checkpoint" in url:
+            return False
+        return "/feed" in url or "linkedin.com/mynetwork" in url
+
+    def ensure_logged_in(
+        self,
+        interactive: bool = True,
+        li_at_cookie: Optional[str] = None,
+    ) -> bool:
+        """
+        Ensure LinkedIn auth is valid.
+        - tries current browser session/profile first
+        - if li_at cookie is provided, injects it
+        - falls back to interactive login when allowed
+        """
+        if self._is_logged_in():
+            logger.info("LinkedIn session is active.")
+            return True
+
+        if li_at_cookie:
+            logger.info("Trying LinkedIn login via li_at cookie...")
+            self.driver.get("https://www.linkedin.com/")
+            try:
+                self.driver.add_cookie(
+                    {
+                        "name": "li_at",
+                        "value": li_at_cookie,
+                        "domain": ".linkedin.com",
+                        "path": "/",
+                        "secure": True,
+                        "httpOnly": True,
+                    }
+                )
+                if self._is_logged_in():
+                    logger.info("LinkedIn login restored from li_at cookie.")
+                    return True
+            except Exception as e:
+                logger.warning(f"Cookie login failed: {e}")
+
+        if interactive:
+            self.wait_manual_login()
+            return self._is_logged_in()
+
+        logger.error("LinkedIn session is not authenticated in non-interactive mode.")
+        return False
 
     def collect_job_links(self, limit: int = 40) -> List[str]:
         for _ in range(4):
@@ -427,3 +471,41 @@ class LinkedInEasyApplier:
             except Exception as e:
                 logger.exception(f"Error on {link}: {e}")
                 continue
+
+    def run_continuous(
+        self,
+        interval_minutes: int,
+        max_applications_per_cycle: Optional[int] = None,
+        max_cycles: Optional[int] = None,
+        interactive_login: bool = False,
+        li_at_cookie: Optional[str] = None,
+    ) -> None:
+        """
+        Repeats auto-apply cycles forever (or until max_cycles is reached).
+        """
+        if interval_minutes < 1:
+            interval_minutes = 1
+
+        if not self.ensure_logged_in(interactive=interactive_login, li_at_cookie=li_at_cookie):
+            raise RuntimeError(
+                "Cannot start unattended mode: LinkedIn is not logged in. "
+                "Run one interactive login first or provide a valid li_at cookie."
+            )
+
+        cycle = 0
+        while True:
+            cycle += 1
+            logger.info(f"Starting auto-apply cycle {cycle}")
+            try:
+                self.run_search_loop(max_applications=max_applications_per_cycle)
+            except Exception as e:
+                logger.exception(f"Cycle {cycle} failed: {e}")
+
+            if max_cycles and cycle >= max_cycles:
+                logger.info(f"Reached max cycles ({max_cycles}); stopping.")
+                break
+
+            sleep_seconds = interval_minutes * 60
+            logger.info(f"Sleeping {interval_minutes} minute(s) before next cycle.")
+            for _ in range(sleep_seconds):
+                time.sleep(1)

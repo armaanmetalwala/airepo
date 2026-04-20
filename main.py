@@ -1,5 +1,4 @@
 import base64
-import sys
 from pathlib import Path
 import traceback
 from typing import List, Optional, Tuple, Dict
@@ -217,6 +216,17 @@ class FileManager:
         uploads = {"plainTextResume": plain_text_resume_file}
 
         return uploads
+
+
+def _runtime_options_from_secrets(secrets_path: Path) -> dict:
+    with open(secrets_path, "r", encoding="utf-8") as f:
+        secrets = yaml.safe_load(f) or {}
+    return {
+        "resume_pdf_path": (secrets.get("resume_pdf_path") or "").strip(),
+        "linkedin_profile_dir": (secrets.get("linkedin_profile_dir") or "").strip(),
+        "linkedin_li_at_cookie": (secrets.get("linkedin_li_at_cookie") or "").strip(),
+        "loop_interval_minutes": int(secrets.get("loop_interval_minutes") or 30),
+    }
 
 
 def create_cover_letter(parameters: dict, llm_api_key: str):
@@ -476,11 +486,25 @@ def run_auto_apply(
     secrets_path: Path,
     plain_text_resume_path: Path,
     data_folder: Path,
+    *,
+    non_interactive: bool = False,
+    loop_forever: bool = False,
+    loop_interval_minutes: int = 30,
+    max_cycles: Optional[int] = None,
+    max_applications_per_cycle: Optional[int] = None,
+    profile_dir: Optional[str] = None,
+    headless: bool = False,
+    li_at_cookie: Optional[str] = None,
 ) -> None:
     """LinkedIn job search + Easy Apply using work_preferences.yaml filters."""
-    with open(secrets_path, "r", encoding="utf-8") as f:
-        secrets = yaml.safe_load(f) or {}
-    resume_pdf = (secrets.get("resume_pdf_path") or "").strip()
+    runtime_defaults = _runtime_options_from_secrets(secrets_path)
+    resume_pdf = runtime_defaults["resume_pdf_path"]
+    profile_dir = profile_dir or runtime_defaults["linkedin_profile_dir"] or None
+    li_at_cookie = li_at_cookie or runtime_defaults["linkedin_li_at_cookie"] or None
+    if loop_interval_minutes < 1:
+        loop_interval_minutes = runtime_defaults["loop_interval_minutes"]
+        if loop_interval_minutes < 1:
+            loop_interval_minutes = 30
     if resume_pdf and not Path(resume_pdf).is_file():
         logger.warning(
             "secrets.yaml resume_pdf_path is not an existing file; PDF upload may be skipped."
@@ -494,7 +518,7 @@ def run_auto_apply(
     gpt.set_resume(resume)
     gpt.set_job_application_profile(profile)
 
-    driver = init_stealth_browser()
+    driver = init_stealth_browser(profile_dir=profile_dir, headless=headless)
     try:
         bot = LinkedInEasyApplier(
             driver,
@@ -503,8 +527,21 @@ def run_auto_apply(
             state_path=data_folder / "applied_state.json",
             resume_pdf_path=resume_pdf or None,
         )
-        bot.wait_manual_login()
-        bot.run_search_loop()
+        if loop_forever:
+            bot.run_continuous(
+                interval_minutes=loop_interval_minutes,
+                max_applications_per_cycle=max_applications_per_cycle,
+                max_cycles=max_cycles,
+                interactive_login=not non_interactive,
+                li_at_cookie=li_at_cookie,
+            )
+        else:
+            if not bot.ensure_logged_in(
+                interactive=not non_interactive,
+                li_at_cookie=li_at_cookie,
+            ):
+                raise RuntimeError("LinkedIn login failed; cannot continue.")
+            bot.run_search_loop(max_applications=max_applications_per_cycle)
     finally:
         try:
             driver.quit()
@@ -512,7 +549,14 @@ def run_auto_apply(
             pass
 
 
-def handle_inquiries(selected_action: str, parameters: dict, llm_api_key: str, secrets_path: Path, plain_text_resume_path: Path, data_folder: Path):
+def handle_inquiries(
+    selected_action: str,
+    parameters: dict,
+    llm_api_key: str,
+    secrets_path: Path,
+    plain_text_resume_path: Path,
+    data_folder: Path,
+):
     """
     Decide which function to call based on the selected user action.
     """
@@ -565,7 +609,17 @@ def prompt_user_action() -> str:
         return ""
 
 
-def main():
+def run_main(
+    auto_apply: bool = False,
+    non_interactive: bool = False,
+    loop_forever: bool = False,
+    loop_interval_minutes: int = 30,
+    max_cycles: Optional[int] = None,
+    max_applications_per_cycle: Optional[int] = None,
+    profile_dir: Optional[str] = None,
+    headless: bool = False,
+    li_at_cookie: Optional[str] = None,
+):
     """Main entry point for the AIHawk Job Application Bot."""
     try:
         # Define and validate the data folder
@@ -580,18 +634,35 @@ def main():
         config["uploads"] = FileManager.get_uploads(plain_text_resume_file)
         config["outputFileDirectory"] = output_folder
 
-        # Interactive prompt for user to select actions
-        selected_actions = prompt_user_action()
+        if auto_apply:
+            run_auto_apply(
+                config,
+                llm_api_key,
+                secrets_file,
+                plain_text_resume_file,
+                data_folder,
+                non_interactive=non_interactive,
+                loop_forever=loop_forever,
+                loop_interval_minutes=loop_interval_minutes,
+                max_cycles=max_cycles,
+                max_applications_per_cycle=max_applications_per_cycle,
+                profile_dir=profile_dir,
+                headless=headless,
+                li_at_cookie=li_at_cookie,
+            )
+        else:
+            # Interactive prompt for user to select actions
+            selected_actions = prompt_user_action()
 
-        # Handle selected actions and execute them
-        handle_inquiries(
-            selected_actions,
-            config,
-            llm_api_key,
-            secrets_file,
-            plain_text_resume_file,
-            data_folder,
-        )
+            # Handle selected actions and execute them
+            handle_inquiries(
+                selected_actions,
+                config,
+                llm_api_key,
+                secrets_file,
+                plain_text_resume_file,
+                data_folder,
+            )
 
     except ConfigError as ce:
         logger.error(f"Configuration error: {ce}")
@@ -607,6 +678,50 @@ def main():
         logger.debug(traceback.format_exc())
     except Exception as e:
         logger.exception(f"An unexpected error occurred: {e}")
+
+
+@click.command()
+@click.option("--auto-apply", is_flag=True, help="Run auto-apply directly without menu.")
+@click.option("--non-interactive", is_flag=True, help="Do not ask for manual login prompt.")
+@click.option("--loop-forever", is_flag=True, help="Continuously run auto-apply cycles.")
+@click.option("--loop-interval-minutes", default=30, type=int, show_default=True, help="Minutes between cycles.")
+@click.option("--max-cycles", type=int, default=None, help="Optional stop after N cycles.")
+@click.option(
+    "--max-applications-per-cycle",
+    type=int,
+    default=None,
+    help="Override applications cap per cycle.",
+)
+@click.option("--profile-dir", type=str, default=None, help="Chrome user-data directory for persistent session.")
+@click.option("--headless", is_flag=True, help="Run browser in headless mode.")
+@click.option(
+    "--li-at-cookie",
+    type=str,
+    default=None,
+    help="LinkedIn li_at cookie value for unattended auth.",
+)
+def main(
+    auto_apply: bool,
+    non_interactive: bool,
+    loop_forever: bool,
+    loop_interval_minutes: int,
+    max_cycles: Optional[int],
+    max_applications_per_cycle: Optional[int],
+    profile_dir: Optional[str],
+    headless: bool,
+    li_at_cookie: Optional[str],
+):
+    run_main(
+        auto_apply=auto_apply,
+        non_interactive=non_interactive,
+        loop_forever=loop_forever,
+        loop_interval_minutes=loop_interval_minutes,
+        max_cycles=max_cycles,
+        max_applications_per_cycle=max_applications_per_cycle,
+        profile_dir=profile_dir,
+        headless=headless,
+        li_at_cookie=li_at_cookie,
+    )
 
 
 if __name__ == "__main__":
